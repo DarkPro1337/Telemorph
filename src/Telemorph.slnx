@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Telemorph.App/Telemorph.App.csproj" />
+  <Project Path="Telemorph.Core.Tests/Telemorph.Core.Tests.csproj" />
+  <Project Path="Telemorph.Core/Telemorph.Core.csproj" />
+</Solution>
