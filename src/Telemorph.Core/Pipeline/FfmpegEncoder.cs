@@ -86,7 +86,7 @@ public sealed class FfmpegEncoder(FfmpegToolchain toolchain)
 
         const string prefix = "out_time_us=";
         if (!line.StartsWith(prefix, StringComparison.Ordinal) ||
-            !long.TryParse(line.AsSpan(prefix.Length),NumberStyles.Integer, CultureInfo.InvariantCulture, out var microseconds))
+            !long.TryParse(line.AsSpan(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out var microseconds))
             return;
 
         var duration = Math.Max(plan.Profile.MaxDurationSeconds, 0.001);

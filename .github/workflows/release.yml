@@ -1,10 +1,8 @@
 name: Build and Release
 
 on:
-  push:
-    branches: [main]
-    tags:
-      - "v*"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -53,6 +53,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -93,22 +95,24 @@ jobs:
           Copy-Item -LiteralPath $ffprobe -Destination "$toolDir/ffprobe.exe"
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md -Destination "publish/${{ matrix.rid }}"
 
-      - name: Bundle pinned FFmpeg (Windows ARM64)
+      - name: Bundle compatible FFmpeg (Windows ARM64)
         if: matrix.rid == 'win-arm64'
         shell: pwsh
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-10-31-13-40/ffmpeg-n8.0-30-g71007e6c12-winarm64-gpl-8.0.zip"
-          $expectedSha256 = "5276af84b736b279a70514c5b7e236f03961ab5517d911a88371838459b94c40"
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg-win-arm64.zip
-          $actualSha256 = (Get-FileHash ffmpeg-win-arm64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          # The native BtbN Windows ARM64 build does not include libvpx-vp9.
+          # Windows 11 ARM can run this verified x64 media backend through emulation.
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-10-31-13-40/ffmpeg-n8.0-30-g71007e6c12-win64-gpl-8.0.zip"
+          $expectedSha256 = "05ecc01bb03ef1f4d908c3c982512f07f888848429be6e9662a5a7c558c60b4f"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-win-x64.zip
+          $actualSha256 = (Get-FileHash ffmpeg-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualSha256 -ne $expectedSha256) {
             throw "FFmpeg archive checksum mismatch. Expected $expectedSha256, got $actualSha256."
           }
-          Expand-Archive ffmpeg-win-arm64.zip -DestinationPath ffmpeg-win-arm64
+          Expand-Archive ffmpeg-win-x64.zip -DestinationPath ffmpeg-win-x64
           $toolDir = "publish/${{ matrix.rid }}/tools/${{ matrix.rid }}"
           New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
-          $ffmpeg = Get-ChildItem ffmpeg-win-arm64 -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          $ffprobe = Get-ChildItem ffmpeg-win-arm64 -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          $ffmpeg = Get-ChildItem ffmpeg-win-x64 -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $ffprobe = Get-ChildItem ffmpeg-win-x64 -Recurse -Filter ffprobe.exe | Select-Object -First 1
           if (-not $ffmpeg -or -not $ffprobe) {
             throw "The verified FFmpeg archive does not contain ffmpeg.exe and ffprobe.exe."
           }
@@ -132,8 +136,77 @@ jobs:
       - name: Verify packaged toolchain
         shell: pwsh
         run: |
+          $publishDir = "publish/${{ matrix.rid }}"
           $executable = if ($IsWindows) { "telemorph.exe" } else { "telemorph" }
-          & "publish/${{ matrix.rid }}/$executable" --doctor
+          $toolSuffix = if ($IsWindows) { ".exe" } else { "" }
+          $app = Join-Path $publishDir $executable
+          $toolDir = Join-Path $publishDir "tools/${{ matrix.rid }}"
+          $ffmpeg = Join-Path $toolDir "ffmpeg$toolSuffix"
+          $ffprobe = Join-Path $toolDir "ffprobe$toolSuffix"
+
+          & $app --doctor
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged toolchain diagnostics failed with exit code $LASTEXITCODE."
+          }
+
+          $smokeDir = Join-Path $env:RUNNER_TEMP "telemorph-smoke-${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          $smokeInput = Join-Path $smokeDir "transparent.apng"
+          $smokeOutput = Join-Path $smokeDir "output.webm"
+
+          & $ffmpeg `
+            -hide_banner -loglevel error -y `
+            -f lavfi `
+            -i "nullsrc=size=64x64:rate=10:duration=0.5,format=rgba,colorchannelmixer=aa=0.5" `
+            -frames:v 5 -plays 0 `
+            $smokeInput
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create the transparent APNG smoke-test input."
+          }
+
+          $inputProbeOutput = & $ffprobe `
+            -v error `
+            -select_streams v:0 `
+            -show_entries "stream=pix_fmt" `
+            -of json `
+            $smokeInput
+          if ($LASTEXITCODE -ne 0) {
+            throw "ffprobe failed to inspect the smoke-test input."
+          }
+
+          $inputPixelFormat = ($inputProbeOutput | ConvertFrom-Json).streams[0].pix_fmt
+          if ($inputPixelFormat -notmatch "a") {
+            throw "Smoke-test input pixel format '$inputPixelFormat' has no alpha channel."
+          }
+
+          & $app `
+            $smokeInput `
+            --emoji `
+            --duration 1 `
+            --no-optimize `
+            --crf 45 `
+            --output $smokeOutput
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged Telemorph smoke conversion failed with exit code $LASTEXITCODE."
+          }
+
+          $probeOutput = & $ffprobe `
+            -v error `
+            -select_streams v:0 `
+            -show_entries "stream=codec_name:stream_tags=alpha_mode" `
+            -of json `
+            $smokeOutput
+          if ($LASTEXITCODE -ne 0) {
+            throw "ffprobe failed to inspect the smoke-test output."
+          }
+
+          $stream = ($probeOutput | ConvertFrom-Json).streams[0]
+          if ($stream.codec_name -ne "vp9") {
+            throw "Smoke-test output codec is '$($stream.codec_name)', expected 'vp9'."
+          }
+          if ($stream.tags.ALPHA_MODE -ne "1") {
+            throw "Smoke-test output does not advertise WebM alpha metadata."
+          }
 
       - name: Create archive (Windows)
         if: runner.os == 'Windows'
@@ -153,9 +226,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Attach release assets
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -165,8 +238,8 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Create release
+      - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: ./artifacts/**/*
-          generate_release_notes: true
