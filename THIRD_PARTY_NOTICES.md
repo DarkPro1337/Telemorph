@@ -8,10 +8,12 @@ The packaged executables are obtained through the pinned `ffmpeg-static` 5.3.0
 and `@derhuerst/ffprobe-static` 5.3.0 npm packages. The exact npm package
 contents are verified by the committed `eng/ffmpeg/package-lock.json`.
 
-The Windows ARM64 archive uses the native BtbN FFmpeg build
-`ffmpeg-n8.0-30-g71007e6c12-winarm64-gpl-8.0.zip`, pinned to its immutable
-release URL and verified against SHA-256
-`5276af84b736b279a70514c5b7e236f03961ab5517d911a88371838459b94c40`.
+The Windows ARM64 Telemorph archive uses the BtbN x64 FFmpeg build
+`ffmpeg-n8.0-30-g71007e6c12-win64-gpl-8.0.zip` because the corresponding native
+Windows ARM64 build does not contain the required `libvpx-vp9` encoder. Windows
+11 ARM runs this media backend through x64 emulation. The archive is pinned to
+its immutable release URL and verified against SHA-256
+`05ecc01bb03ef1f4d908c3c982512f07f888848429be6e9662a5a7c558c60b4f`.
 
 FFmpeg is licensed separately from Telemorph. The packaged builds can include
 GPL-licensed components. Copyright, license, corresponding-source, and build

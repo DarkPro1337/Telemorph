@@ -125,7 +125,12 @@ metadata and validates every encoded candidate.
 
 ## Release packaging
 
-The release workflow publishes self-contained builds for:
+Pull requests from `dev` to `main` run formatting checks, a warnings-as-errors
+build, and the full test suite. Pushing or merging a commit into `main` does not
+create release binaries.
+
+Publishing a GitHub Release starts the release workflow from that release's tag
+and produces self-contained builds for:
 
 - `win-x64`
 - `win-arm64`
@@ -134,9 +139,11 @@ The release workflow publishes self-contained builds for:
 - `osx-arm64`
 
 FFmpeg and ffprobe are restored from exact npm dependency versions using the
-committed lockfile. Windows ARM64 uses a pinned native BtbN archive with an
-explicit SHA-256 check. The tools are copied under `tools/<RID>/` and verified
-by running `telemorph --doctor` before an archive is uploaded.
+committed lockfile. The Windows ARM64 release uses a pinned BtbN x64 media
+backend through Windows 11 ARM emulation because the native build lacks
+`libvpx-vp9`; its archive has an explicit SHA-256 check. The tools are copied
+under `tools/<RID>/`, checked with `telemorph --doctor`, and exercised by a
+transparent APNG-to-VP9 WebM smoke test before an archive is uploaded.
 
 See [third-party notices](THIRD_PARTY_NOTICES.md) for FFmpeg licensing and
 source information.
