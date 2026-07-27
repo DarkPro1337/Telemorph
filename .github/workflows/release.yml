@@ -2,81 +2,170 @@ name: Build and Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test
+        run: dotnet test src/Telemorph.slnx -c Release
+
   build:
     name: Build ${{ matrix.rid }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - rid: win-x64
             os: windows-latest
-            artifact_name: telemorph-win-x64.exe
+            archive: telemorph-win-x64.zip
           - rid: win-arm64
-            os: windows-latest
-            artifact_name: telemorph-win-arm64.exe
+            os: windows-11-arm
+            archive: telemorph-win-arm64.zip
           - rid: linux-x64
             os: ubuntu-latest
-            artifact_name: telemorph-linux-x64
+            archive: telemorph-linux-x64.tar.gz
           - rid: linux-arm64
-            os: ubuntu-latest
-            artifact_name: telemorph-linux-arm64
+            os: ubuntu-24.04-arm
+            archive: telemorph-linux-arm64.tar.gz
           - rid: osx-arm64
-            os: macos-latest
-            artifact_name: telemorph-osx-arm64
+            os: macos-15
+            archive: telemorph-osx-arm64.tar.gz
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '10.0.x'
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
 
-    - name: Publish
-      run: >
-        dotnet publish src/Telemorph.App/Telemorph.App.csproj 
-        -c Release 
-        -r ${{ matrix.rid }} 
-        --self-contained false 
-        -p:PublishSingleFile=true 
-        -p:PublishTrimmed=true 
-        -o ./publish/${{ matrix.rid }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: eng/ffmpeg/package-lock.json
 
-    - name: Rename executable (Non-Windows)
-      if: matrix.os != 'windows-latest'
-      run: mv ./publish/${{ matrix.rid }}/telemorph ./publish/${{ matrix.rid }}/${{ matrix.artifact_name }}
-      shell: bash
+      - name: Restore verified FFmpeg toolchain
+        if: matrix.rid != 'win-arm64'
+        working-directory: eng/ffmpeg
+        run: npm ci --ignore-scripts=false
 
-    - name: Rename executable (Windows)
-      if: matrix.os == 'windows-latest'
-      run: ren .\publish\${{ matrix.rid }}\telemorph.exe ${{ matrix.artifact_name }}
-      shell: cmd
+      - name: Publish
+        run: >
+          dotnet publish src/Telemorph.App/Telemorph.App.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:PublishTrimmed=true
+          -o ./publish/${{ matrix.rid }}
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.rid }}
-        path: ./publish/${{ matrix.rid }}/${{ matrix.artifact_name }}
+      - name: Bundle FFmpeg (Windows)
+        if: runner.os == 'Windows' && matrix.rid != 'win-arm64'
+        shell: pwsh
+        run: |
+          $toolDir = "publish/${{ matrix.rid }}/tools/${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+          $ffmpeg = node -p "require('./eng/ffmpeg/node_modules/ffmpeg-static')"
+          $ffprobe = node -p "require('./eng/ffmpeg/node_modules/@derhuerst/ffprobe-static')"
+          Copy-Item -LiteralPath $ffmpeg -Destination "$toolDir/ffmpeg.exe"
+          Copy-Item -LiteralPath $ffprobe -Destination "$toolDir/ffprobe.exe"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md -Destination "publish/${{ matrix.rid }}"
+
+      - name: Bundle pinned FFmpeg (Windows ARM64)
+        if: matrix.rid == 'win-arm64'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-10-31-13-40/ffmpeg-n8.0-30-g71007e6c12-winarm64-gpl-8.0.zip"
+          $expectedSha256 = "5276af84b736b279a70514c5b7e236f03961ab5517d911a88371838459b94c40"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-win-arm64.zip
+          $actualSha256 = (Get-FileHash ffmpeg-win-arm64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "FFmpeg archive checksum mismatch. Expected $expectedSha256, got $actualSha256."
+          }
+          Expand-Archive ffmpeg-win-arm64.zip -DestinationPath ffmpeg-win-arm64
+          $toolDir = "publish/${{ matrix.rid }}/tools/${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+          $ffmpeg = Get-ChildItem ffmpeg-win-arm64 -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $ffprobe = Get-ChildItem ffmpeg-win-arm64 -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $ffmpeg -or -not $ffprobe) {
+            throw "The verified FFmpeg archive does not contain ffmpeg.exe and ffprobe.exe."
+          }
+          Copy-Item -LiteralPath $ffmpeg.FullName -Destination "$toolDir/ffmpeg.exe"
+          Copy-Item -LiteralPath $ffprobe.FullName -Destination "$toolDir/ffprobe.exe"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md -Destination "publish/${{ matrix.rid }}"
+
+      - name: Bundle FFmpeg (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tool_dir="publish/${{ matrix.rid }}/tools/${{ matrix.rid }}"
+          mkdir -p "$tool_dir"
+          ffmpeg_path="$(node -p "require('./eng/ffmpeg/node_modules/ffmpeg-static')")"
+          ffprobe_path="$(node -p "require('./eng/ffmpeg/node_modules/@derhuerst/ffprobe-static')")"
+          cp "$ffmpeg_path" "$tool_dir/ffmpeg"
+          cp "$ffprobe_path" "$tool_dir/ffprobe"
+          chmod +x "$tool_dir/ffmpeg" "$tool_dir/ffprobe"
+          cp LICENSE THIRD_PARTY_NOTICES.md "publish/${{ matrix.rid }}"
+
+      - name: Verify packaged toolchain
+        shell: pwsh
+        run: |
+          $executable = if ($IsWindows) { "telemorph.exe" } else { "telemorph" }
+          & "publish/${{ matrix.rid }}/$executable" --doctor
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "publish/${{ matrix.rid }}/*" -DestinationPath "${{ matrix.archive }}"
+
+      - name: Create archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -C "publish/${{ matrix.rid }}" -czf "${{ matrix.archive }}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
 
   release:
     name: Create Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
-      - name: Create Release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: ./artifacts/**/*
